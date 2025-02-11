@@ -7,6 +7,7 @@ from dotenv import load_dotenv
 from openai import OpenAI
 import torch
 from transformers import pipeline
+import time
 
 # Load environment variables from .env file
 load_dotenv()
@@ -40,14 +41,25 @@ def transcribe_audio(audio_file):
 
 def diarize_audio(audio_file):
     """Performs speaker diarization (who said what)."""
-    print("Processing speaker identification...")
+    start_time = time.time()
+    print("\nProcessing speaker identification...")
+    print("This step typically takes 3-5 minutes for a 5-minute audio file")
+    print("Still processing... Please wait...")
+    
     diarization = DIARIZATION_PIPELINE(audio_file)
     
-    # Use dictionary comprehension for faster processing
+    # Show active processing
     speakers = {}
+    processed_time = 0
     for turn, _, speaker in diarization.itertracks(yield_label=True):
         speakers.setdefault(speaker, []).append((turn.start, turn.end))
+        if turn.end > processed_time:
+            processed_time = turn.end
+            elapsed = time.time() - start_time
+            print(f"\rProcessed {processed_time:.1f} seconds of audio... (Time elapsed: {elapsed:.1f}s)", end="")
     
+    total_time = time.time() - start_time
+    print(f"\n✓ Speaker identification complete! Time taken: {total_time:.1f} seconds")
     print(f"Found {len(speakers)} distinct speakers")
     return speakers
 
@@ -75,21 +87,31 @@ def match_speakers(transcript, speakers):
     return labeled_transcript
 
 def generate_summary(transcript):
-    """Summarizes the transcript using BART."""
+    """Generates an analytical summary of the congressional hearing."""
+    client = OpenAI()
+    
     text_data = "\n".join(f"{t['speaker']}: {t['text']}" for t in transcript)
     
-    # Process in chunks with progress indication
-    max_chunk = 1024
-    chunks = [text_data[i:i + max_chunk] for i in range(0, len(text_data), max_chunk)]
+    print("\nGenerating analytical summary...")
     
-    print(f"Generating summary in {len(chunks)} chunks...")
-    summaries = []
-    for i, chunk in enumerate(chunks, 1):
-        print(f"Processing chunk {i}/{len(chunks)}...")
-        summary = SUMMARIZER(chunk, max_length=130, min_length=30, do_sample=False)
-        summaries.append(summary[0]['summary_text'])
+    prompt = """Please provide an analytical summary of this congressional hearing that includes:
+    1. Main topics discussed
+    2. Key arguments or positions presented
+    3. Notable exchanges between speakers
+    4. Important policy implications
+    5. Any significant decisions or conclusions reached
     
-    return " ".join(summaries)
+    Format the summary with clear sections and bullet points where appropriate."""
+    
+    response = client.chat.completions.create(
+        model="gpt-3.5-turbo",
+        messages=[
+            {"role": "system", "content": "You are an expert political analyst summarizing congressional hearings."},
+            {"role": "user", "content": f"{prompt}\n\nHearing transcript:\n{text_data}"}
+        ]
+    )
+    
+    return response.choices[0].message.content
 
 def save_transcript(transcript, summary, audio_file):
     """Saves transcript in JSON, TXT, and SRT formats."""
@@ -126,12 +148,17 @@ def main():
     print("\n🎯 Starting transcription process...")
     
     try:
-        transcript = transcribe_audio(args.audio_file)
-        speakers = diarize_audio(args.audio_file)
-        labeled_transcript = match_speakers(transcript, speakers)
+        # If you want to use the existing transcript and just generate a new summary:
+        with open(f"{os.path.splitext(args.audio_file)[0]}.json", "r") as f:
+            data = json.load(f)
+            labeled_transcript = data["transcript"]
+        
+        # Generate new analytical summary
         summary = generate_summary(labeled_transcript)
+        
+        # Save updated version
         save_transcript(labeled_transcript, summary, args.audio_file)
-        print("\n✅ Processing complete! Files saved in the same directory.")
+        print("\n✅ New analytical summary generated and saved!")
         
     except Exception as e:
         print(f"\n❌ Error: {str(e)}")
